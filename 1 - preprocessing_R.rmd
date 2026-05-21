@@ -1,0 +1,78 @@
+```{r}
+install.packages("BiocManager")
+BiocManager::install("Seurat")
+BiocManager::install("SoupX")
+BiocManager::install("scDblFinder")
+BiocManager::install("anndataR")
+BiocManager::install("hdf5r")
+BiocManager::install("glmGamPoi")
+```
+Dataset from:
+https://www.10xgenomics.com/datasets/160k_DTC_Matched_PBMC_MultiPro_Human_Discovery_Panel
+
+```{r}
+library(SoupX)
+library(Seurat)
+library(scDblFinder)
+library(anndataR)
+library(future)
+options(future.globals.maxSize = 2 * 1024^3)
+
+set.seed(7)
+input_dir <- file.path("data", "pbmc_2control_lc")
+output_dir <- file.path("data", "pbmc_2control_lc")
+samples <- c("PBMC_Control1", "PBMC_Control2", "Lung_Cancer_PBMC")
+```
+
+```{r}
+soupx_samples <- list()
+clusters <- list()
+for (sample in samples) {
+  tod = Seurat::Read10X_h5(file.path(input_dir, sample, "raw_feature_bc_matrix.h5"))[["Gene Expression"]]
+  toc = Seurat::Read10X_h5(file.path(input_dir, sample, "filtered_feature_bc_matrix.h5"))[["Gene Expression"]]
+  filt_genes <- rownames(toc)
+  tod <- tod[filt_genes, ]
+  
+  seurat <- CreateSeuratObject(counts=toc)
+  seurat <- SCTransform(seurat, )
+  seurat <- RunPCA(seurat)
+  seurat <- RunUMAP(seurat, dims=1:30)
+  seurat <- FindNeighbors(seurat, dims=1:30)
+  seurat <- FindClusters(seurat)
+  meta <- seurat@meta.data
+  sample_clusters <- setNames(meta$seurat_clusters, rownames(meta))
+
+  sc <- SoupChannel(tod, toc)
+  sc <- setClusters(sc, sample_clusters)
+  sc <- setDR(sc, seurat@reductions$umap@cell.embeddings)
+  print(head(meta))
+  sc <- autoEstCont(sc)
+  out <- adjustCounts(sc, roundToInt=TRUE)
+
+  soupx_samples[[sample]] <- out
+  clusters[[sample]] <- sample_clusters
+}
+```
+
+```{r}
+scdblfinder_samples <- list()
+for (sample in samples) {
+    sce <- SingleCellExperiment(assays = list(counts = soupx_samples[[sample]]))
+    sce <- scDblFinder(sce, clusters=clusters[[sample]])
+    scdblfinder_samples[[sample]] <- sce
+}
+```
+```{r}
+for (sample in samples) {
+  sce <- scdblfinder_samples[[sample]]
+  pct <- 100 * mean(sce$scDblFinder.class != "singlet", na.rm = TRUE)
+  print(paste(sample, "predicted multiplet rate:", pct))
+}
+```
+
+```{r}
+for (sample in samples) {
+  write_h5ad(scdblfinder_samples[[sample]], file.path(output_dir, paste0(sample, ".h5ad")), mode="w")
+}
+```
+
